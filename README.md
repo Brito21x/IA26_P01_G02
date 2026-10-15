@@ -1,5 +1,13 @@
 # IA26_P01_G02 — Projeto de Inteligência Artificial
 
+## Elementos do Grupo (Grupo 02)
+
+- **Edgar Brito** - 29330
+- **Diogo Ribeiro** — 29321
+- **Tiago Lima** — 29328
+- **José Rebelo** — 31516
+- **José Oliveira** — 16941
+
 ## Estrutura do Projeto
 
 - **`model.py`**: O motor do sistema que contém as classes base (`Request`, `Vehicle`, `State`, `Problem`), o carregamento relacional dos CSVs, a função de custo e a validação de rotas.
