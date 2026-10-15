@@ -6,6 +6,6 @@
 - **`01_eda_tiny.ipynb`**: Análise Exploratória de Dados (_EDA_), validação de janelas temporais, verificação de pesos face às capacidades da frota e mapeamento geoespacial em interatividade com `folium`.
 - **`data_tiny/`**: Pasta contendo o conjunto de dados para o distrito de Braga.
 
-## Acesso ao Repositório / Notebooks
+## Acesso ao Repositório
 
 - **Link do Repositório (GitHub):** https://github.com/Brito21x/IA26_P01_G02.git
