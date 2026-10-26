@@ -2,7 +2,7 @@
 
 ## Elementos do Grupo (Grupo 02)
 
-- **Edgar Brito** - 29330
+- **Edgar Brito** — 29330
 - **Diogo Ribeiro** — 29321
 - **Tiago Lima** — 29328
 - **José Rebelo** — 31516
@@ -10,10 +10,34 @@
 
 ## Estrutura do Projeto
 
-- **`model.py`**: O motor do sistema que contém as classes base (`Request`, `Vehicle`, `State`, `Problem`), o carregamento relacional dos CSVs, a função de custo e a validação de rotas.
-- **`01_eda_tiny.ipynb`**: Análise Exploratória de Dados (_EDA_), validação de janelas temporais, verificação de pesos face às capacidades da frota e mapeamento geoespacial em interatividade com `folium`.
-- **`data_tiny/`**: Pasta contendo o conjunto de dados para o distrito de Braga.
+```
+IA26_P01_G02/
+├── data_tiny/          # Dataset pequeno
+├── data_small/         # Dataset intermédio
+├── src/
+│   ├── model.py        # Request, Vehicle, State, Problem (custo + feasibility)
+│   ├── informed.py     # Greedy + A* (2 heurísticas)
+│   ├── local_search.py # Hill-Climbing 
+│   └── csp.py          # CSP (backtracking + forward checking + AC-3)
+├── notebooks/
+│   ├── 01_Project01_G02.ipynb   # Notebook principal
+│   └── 02_eda_tiny.ipynb        # Análise exploratória
+└── README.md
+```
+
+## Como executar
+
+```bash
+pip install pandas matplotlib folium # em caso de não ter instalado
+cd IA26_P01_G02
+python -m src.model          # teste do motor
+python -m src.informed       # teste Greedy/A*
+python -m src.local_search   # teste Hill-Climbing
+python -m src.csp            # teste CSP
+```
+
+Ou abrir `notebooks/01_Project01_G02.ipynb` no Jupyter / VS Code.
 
 ## Acesso ao Repositório
 
-- **Link do Repositório (GitHub):** https://github.com/Brito21x/IA26_P01_G02.git
+- **GitHub:** https://github.com/Brito21x/IA26_P01_G02.git
