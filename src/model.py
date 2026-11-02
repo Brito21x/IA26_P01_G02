@@ -10,8 +10,8 @@ Classes:
 
 from __future__ import annotations
 import pandas as pd
-from datetime import datetime, timedelta
-from typing import List, Dict, Tuple, Optional, Any
+from datetime import datetime
+from typing import List, Dict, Tuple, Optional
 
 
 class Request:
@@ -115,7 +115,7 @@ class Problem:
     route_feasibility_checker.
     """
 
-    def __init__(self, data_folder: str = "data_tiny"):
+    def __init__(self, data_folder: str = "data_small"):
         self.data_folder = data_folder.rstrip("/")
         self.locations: pd.DataFrame = None
         self.producer_to_loc: Dict[int, int] = {}
@@ -138,10 +138,12 @@ class Problem:
     def _load_locations(self):
         path = f"{self.data_folder}/locations.csv"
         self.locations = pd.read_csv(path)
-        for _, row in self.locations.iterrows():
-            lid = int(row["location_id"])
-            ltype = row["location_type"]
-            ref = int(row["ref_id"])
+        for lid, ltype, ref in zip(
+            self.locations["location_id"],
+            self.locations["location_type"],
+            self.locations["ref_id"],
+        ):
+            lid, ref = int(lid), int(ref)
             if ltype == "producer":
                 self.producer_to_loc[ref] = lid
             elif ltype == "delivery_location":
@@ -151,15 +153,15 @@ class Problem:
 
     def _load_distances(self):
         df = pd.read_csv(f"{self.data_folder}/distance_matrix.csv")
-        matriz = {}
-        for _, row in df.iterrows():
-            o = int(row["origin_location_id"])
-            d = int(row["destination_location_id"])
-            matriz[(o, d)] = {
-                "dist_km": float(row["distance_km"]),
-                "time_min": float(row["duration_min"]),
-            }
-        self.distance_matrix = matriz
+        self.distance_matrix = {
+            (int(o), int(d)): {"dist_km": float(km), "time_min": float(mn)}
+            for o, d, km, mn in zip(
+                df["origin_location_id"],
+                df["destination_location_id"],
+                df["distance_km"],
+                df["duration_min"],
+            )
+        }
 
     def _load_vehicles(self):
         df = pd.read_csv(f"{self.data_folder}/vehicles.csv")
@@ -196,7 +198,7 @@ class Problem:
             dest_loc = self.delivery_to_loc.get(deliv_ref)
             if origin_loc is None or dest_loc is None:
                 continue  # skip inconsistências
-            req = Request(
+            pedidos.append(Request(
                 item_id=int(row["order_item_id"]),
                 order_id=int(row["order_id"]),
                 weight_kg=peso,
@@ -208,8 +210,7 @@ class Problem:
                 deliv_end=pd.to_datetime(row["delivery_end"]),
                 producer_id=prod_id,
                 delivery_ref_id=deliv_ref,
-            )
-            pedidos.append(req)
+            ))
         self.requests = pedidos
 
     def _load_rules(self):
@@ -240,12 +241,13 @@ class Problem:
         """Recebe lista de location_ids e devolve (distância total km, tempo total min)."""
         total_dist = 0.0
         total_time = 0.0
+        dm = self.distance_matrix
         for i in range(len(route) - 1):
-            o, d = route[i], route[i + 1]
-            if (o, d) not in self.distance_matrix:
+            info = dm.get((route[i], route[i + 1]))
+            if info is None:
                 return float("inf"), float("inf")
-            total_dist += self.distance_matrix[(o, d)]["dist_km"]
-            total_time += self.distance_matrix[(o, d)]["time_min"]
+            total_dist += info["dist_km"]
+            total_time += info["time_min"]
         return total_dist, total_time
 
     def route_feasibility_checker(
@@ -255,6 +257,7 @@ class Problem:
         Verifica se a rota é viável para o veículo:
         - existência de arcos na matriz de distâncias
         - capacidade (se requests fornecidos)
+        (Janelas temporais ainda não são verificadas aqui.)
         """
         veiculo = self.vehicles.get(vehicle_id)
         if not veiculo:
@@ -298,10 +301,10 @@ if __name__ == "__main__":
     import os
     print("A iniciar o carregamento do modelo...")
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    data = os.path.join(root, "data_tiny")
+    data = os.path.join(root, "data_small")
     p = Problem(data_folder=data)
     print(p.summary())
-    print(f"\nExemplos de requests:")
+    print("\nExemplos de requests:")
     for r in p.requests[:5]:
         print(" ", r)
     print(f"\nVeículos: {list(p.vehicles.values())}")

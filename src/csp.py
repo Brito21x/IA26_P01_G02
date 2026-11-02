@@ -1,17 +1,19 @@
 """
 csp.py — Formulação CSP para atribuição de pedidos a veículos.
-Usa backtracking com forward checking e AC-3 (simplificado).
+Backtracking + forward checking + consistência de nó (AC-3 simplificado),
+com memoização de estados falhados e quebra de simetria (bin packing).
 IA26_P01_G02
 """
 
 from __future__ import annotations
 import time
-from typing import List, Dict, Tuple, Optional, Set
-from copy import deepcopy
+from typing import List, Dict, Optional
 try:
-    from .model import Problem, Request, Vehicle
+    from .model import Problem
 except ImportError:
-    from model import Problem, Request, Vehicle
+    from model import Problem
+
+EPS = 1e-6
 
 
 class CSPResult:
@@ -34,6 +36,7 @@ class CSPResult:
         return (
             f"CSP({status}): {len(self.assignment)} assignments, "
             f"backtracks={self.backtracks}, time={self.runtime_s*1000:.1f}ms"
+            + (f" [{self.message}]" if self.message else "")
         )
 
 
@@ -41,115 +44,144 @@ class VehicleAssignmentCSP:
     """
     Variáveis: cada pedido (item_id)
     Domínio: veículos disponíveis
-    Restrições hard:
-      - capacidade do veículo (soma pesos dos pedidos atribuídos <= capacity)
-    Soft (penalizadas / prioritárias):
-      - preferir veículos refrigerados para produtos sensíveis (não modelado aqui)
+    Restrição hard: soma dos pesos atribuídos a um veículo <= capacidade.
+
+    Ordem das variáveis: peso decrescente. É equivalente a MRV neste problema
+    (o pedido mais pesado é o que tem menos veículos onde cabe) e custa O(1).
     """
 
-    def __init__(self, problem: Problem):
+    def __init__(self, problem: Problem, time_limit_s: float = 60.0):
         self.problem = problem
-        self.variables: List[int] = [r.item_id for r in problem.requests]
-        self.domains: Dict[int, List[int]] = {
-            r.item_id: list(problem.vehicles.keys()) for r in problem.requests
-        }
-        self.weights: Dict[int, float] = {
-            r.item_id: r.weight_kg for r in problem.requests
-        }
+        self.time_limit_s = time_limit_s
+
+        self.weights: Dict[int, float] = {r.item_id: r.weight_kg for r in problem.requests}
+        self.variables: List[int] = sorted(
+            self.weights, key=lambda x: self.weights[x], reverse=True
+        )
+        self.vehicle_ids: List[int] = list(problem.vehicles.keys())
         self.capacities: Dict[int, float] = {
             vid: v.capacity_kg for vid, v in problem.vehicles.items()
         }
+        self.domains: Dict[int, List[int]] = {
+            item: list(self.vehicle_ids) for item in self.variables
+        }
+
+        # suffix_weight[i] = soma dos pesos das variáveis i..n-1
+        n = len(self.variables)
+        self.suffix_weight = [0.0] * (n + 1)
+        for i in range(n - 1, -1, -1):
+            self.suffix_weight[i] = self.suffix_weight[i + 1] + self.weights[self.variables[i]]
+
         self.backtracks = 0
+        self._failed = set()
+        self._deadline = 0.0
+        self._timed_out = False
 
-    def is_consistent(self, assignment: Dict[int, int], var: int, val: int) -> bool:
-        """Verifica restrição de capacidade após atribuir var=val."""
-        load = self.weights[var]
-        for other, v in assignment.items():
-            if v == val:
-                load += self.weights[other]
-        return load <= self.capacities[val] + 1e-6
-
-    def select_unassigned(self, assignment: Dict[int, int]) -> Optional[int]:
-        """MRV: variável com menor domínio residual (simplificado: primeira não atribuída)."""
-        for v in self.variables:
-            if v not in assignment:
-                return v
-        return None
-
-    def forward_check(
-        self, assignment: Dict[int, int], var: int, val: int, domains: Dict[int, List[int]]
-    ) -> Optional[Dict[int, List[int]]]:
-        """Remove de outros domínios valores que violariam capacidade."""
-        new_domains = {k: list(v) for k, v in domains.items()}
-        remaining_cap = self.capacities[val] - self.weights[var]
-        for other, v in assignment.items():
-            if v == val:
-                remaining_cap -= self.weights[other]
-
-        for other in self.variables:
-            if other in assignment or other == var:
-                continue
-            if val in new_domains[other]:
-                if self.weights[other] > remaining_cap + 1e-6:
-                    new_domains[other] = [x for x in new_domains[other] if x != val]
-                    if not new_domains[other]:
-                        return None  # domínio vazio
-        return new_domains
-
-    def ac3(self, domains: Dict[int, List[int]]) -> bool:
+    # ------------------------------------------------------------------
+    def ac3(self) -> bool:
         """
-        AC-3 simplificado: apenas verifica consistência de capacidade global
-        (não é o AC-3 clássico de arcos, mas remove valores impossíveis).
+        Pré-processamento (AC-3 simplificado / consistência de nó):
+        remove dos domínios os veículos onde o pedido, sozinho, já não cabe.
         """
-        # Para cada veículo, se o peso mínimo de um pedido > capacidade, remove
         for var in self.variables:
-            new_dom = []
-            for val in domains[var]:
-                if self.weights[var] <= self.capacities[val] + 1e-6:
-                    new_dom.append(val)
-            domains[var] = new_dom
-            if not new_dom:
+            self.domains[var] = [
+                v for v in self.domains[var]
+                if self.weights[var] <= self.capacities[v] + EPS
+            ]
+            if not self.domains[var]:
                 return False
         return True
 
-    def backtrack(
-        self,
-        assignment: Dict[int, int],
-        domains: Dict[int, List[int]],
-    ) -> Optional[Dict[int, int]]:
-        var = self.select_unassigned(assignment)
-        if var is None:
-            return assignment
+    def forward_check(self, next_idx: int, free: Dict[int, float]) -> bool:
+        """
+        Forward checking sobre as variáveis ainda por atribuir.
+        - o peso restante tem de caber na capacidade livre total;
+        - a próxima variável (a mais pesada das restantes) tem de caber em
+          algum veículo do seu domínio (se ela cabe, as mais leves também).
+        """
+        if next_idx >= len(self.variables):
+            return True
+        if self.suffix_weight[next_idx] > sum(free.values()) + EPS:
+            return False
+        nxt = self.variables[next_idx]
+        w = self.weights[nxt]
+        return any(free[v] + EPS >= w for v in self.domains[nxt])
 
-        for val in list(domains[var]):
-            if self.is_consistent(assignment, var, val):
-                assignment[var] = val
-                new_domains = self.forward_check(assignment, var, val, domains)
-                if new_domains is not None:
-                    result = self.backtrack(assignment, new_domains)
-                    if result is not None:
-                        return result
-                del assignment[var]
-                self.backtracks += 1
-        return None
+    def backtrack(self, idx: int, free: Dict[int, float], assignment: Dict[int, int]) -> bool:
+        if idx == len(self.variables):
+            return True
+        if time.perf_counter() > self._deadline:
+            self._timed_out = True
+            return False
+
+        # Memoização: o futuro só depende de (idx, capacidades livres ordenadas)
+        key = (idx, tuple(sorted(round(f, 6) for f in free.values())))
+        if key in self._failed:
+            return False
+
+        var = self.variables[idx]
+        w = self.weights[var]
+
+        # Best-fit: primeiro os veículos com menos espaço livre onde ainda cabe
+        candidates = sorted(
+            (vid for vid in self.domains[var] if free[vid] + EPS >= w),
+            key=lambda vid: free[vid],
+        )
+
+        tried = set()  # quebra de simetria: mesma capacidade livre => equivalentes
+        for val in candidates:
+            sig = round(free[val], 6)
+            if sig in tried:
+                continue
+            tried.add(sig)
+
+            free[val] -= w
+            assignment[var] = val
+            if self.forward_check(idx + 1, free) and self.backtrack(idx + 1, free, assignment):
+                return True
+            free[val] += w
+            del assignment[var]
+            self.backtracks += 1
+
+            if self._timed_out:
+                return False
+
+        if not self._timed_out:
+            self._failed.add(key)
+        return False
 
     def solve(self) -> CSPResult:
         t0 = time.perf_counter()
-        domains = deepcopy(self.domains)
-        if not self.ac3(domains):
+
+        if not self.ac3():
             return CSPResult({}, False, 0, time.perf_counter() - t0, "AC-3 falhou")
 
+        if self.suffix_weight[0] > sum(self.capacities.values()) + EPS:
+            return CSPResult(
+                {}, False, 0, time.perf_counter() - t0,
+                "Peso total dos pedidos excede a capacidade total da frota",
+            )
+
         self.backtracks = 0
-        solution = self.backtrack({}, domains)
+        self._failed = set()
+        self._timed_out = False
+        self._deadline = t0 + self.time_limit_s
+
+        free = dict(self.capacities)
+        assignment: Dict[int, int] = {}
+        ok = self.backtrack(0, free, assignment)
         runtime = time.perf_counter() - t0
-        if solution is None:
-            return CSPResult({}, False, self.backtracks, runtime, "Sem atribuição viável")
-        return CSPResult(solution, True, self.backtracks, runtime, "Atribuição encontrada")
+
+        if ok:
+            return CSPResult(assignment, True, self.backtracks, runtime, "Atribuição encontrada")
+        if self._timed_out:
+            return CSPResult({}, False, self.backtracks, runtime,
+                             f"Tempo limite ({self.time_limit_s:.0f}s) atingido")
+        return CSPResult({}, False, self.backtracks, runtime, "Sem atribuição viável")
 
 
-def run_csp(problem: Problem) -> CSPResult:
-    csp = VehicleAssignmentCSP(problem)
-    return csp.solve()
+def run_csp(problem: Problem, time_limit_s: float = 60.0) -> CSPResult:
+    return VehicleAssignmentCSP(problem, time_limit_s=time_limit_s).solve()
 
 
 if __name__ == "__main__":
@@ -157,21 +189,19 @@ if __name__ == "__main__":
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if root not in sys.path:
         sys.path.insert(0, root)
-    data = os.path.join(root, "data_tiny")
+    data = os.path.join(root, "data_small")
     p = Problem(data)
     res = run_csp(p)
     print(res)
+
     if res.feasible:
-        # resumo por veículo
         from collections import defaultdict
         loads = defaultdict(float)
         counts = defaultdict(int)
-        for item, vid in res.assignment.items():
-            loads[vid] += p.requests[[r.item_id for r in p.requests].index(item)].weight_kg if False else 0
-        # better
         weight_map = {r.item_id: r.weight_kg for r in p.requests}
         for item, vid in res.assignment.items():
             loads[vid] += weight_map[item]
             counts[vid] += 1
         for vid in sorted(loads):
-            print(f"  V{vid}: {counts[vid]} items, load={loads[vid]:.1f}kg / {p.vehicles[vid].capacity_kg}kg")
+            cap = p.vehicles[vid].capacity_kg
+            print(f"  V{vid}: {counts[vid]:2d} items | load={loads[vid]:6.1f}kg / {cap:.1f}kg ({100*loads[vid]/cap:.1f}%)")

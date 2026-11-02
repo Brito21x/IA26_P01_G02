@@ -6,12 +6,13 @@ IA26_P01_G02
 from __future__ import annotations
 import heapq
 import time
-from typing import List, Tuple, Dict, Optional, Callable
-from datetime import datetime, timedelta
+from typing import List, Optional, Callable
 try:
-    from .model import Problem, Request, Vehicle, State
+    from .model import Problem
 except ImportError:
-    from model import Problem, Request, Vehicle, State
+    from model import Problem
+
+INF = float("inf")
 
 
 class SearchResult:
@@ -45,8 +46,11 @@ class SearchResult:
         )
 
 
+# ----------------------------------------------------------------------
+# Heurísticas
+# ----------------------------------------------------------------------
 def heuristic_nearest(problem: Problem, current: int, remaining: List[int]) -> float:
-    """h1: distância ao local restante mais próximo (admissível para TSP residual)."""
+    """h1: distância ao local restante mais próximo (admissível e consistente)."""
     if not remaining:
         return 0.0
     return min(problem.get_distance(current, loc) for loc in remaining)
@@ -54,21 +58,42 @@ def heuristic_nearest(problem: Problem, current: int, remaining: List[int]) -> f
 
 def heuristic_mst_approx(problem: Problem, current: int, remaining: List[int]) -> float:
     """
-    h2: aproximação MST — min distance to remaining + 0.5 * sum of pairwise mins.
-    Mais informativa que nearest, ainda aproximada.
+    h2: peso da MST (Prim) sobre {current} ∪ remaining, com arestas simétricas
+    min(d(a,b), d(b,a)). Qualquer caminho que visite todos os locais é uma
+    árvore geradora, logo a MST é um limite inferior (admissível).
+    Mais informativa que h1.
     """
     if not remaining:
         return 0.0
-    h = min(problem.get_distance(current, loc) for loc in remaining)
-    # soma das distâncias mínimas entre pares (aproximação grosseira do MST)
-    extra = 0.0
-    locs = list(remaining)
-    for i, a in enumerate(locs):
-        if i + 1 < len(locs):
-            extra += min(problem.get_distance(a, b) for b in locs[i + 1 :])
-    return h + 0.5 * extra
+    nodes = [current] + list(remaining)
+    k = len(nodes)
+    in_tree = [False] * k
+    best = [INF] * k
+    best[0] = 0.0
+    total = 0.0
+    for _ in range(k):
+        u = -1
+        bu = INF
+        for i in range(k):
+            if not in_tree[i] and best[i] < bu:
+                u, bu = i, best[i]
+        if u == -1:  # grafo desligado: devolve o que já foi acumulado
+            break
+        in_tree[u] = True
+        total += bu
+        a = nodes[u]
+        for v in range(k):
+            if not in_tree[v]:
+                b = nodes[v]
+                w = min(problem.get_distance(a, b), problem.get_distance(b, a))
+                if w < best[v]:
+                    best[v] = w
+    return total
 
 
+# ----------------------------------------------------------------------
+# Greedy
+# ----------------------------------------------------------------------
 def greedy_search(
     problem: Problem,
     start: int,
@@ -77,9 +102,8 @@ def greedy_search(
     heuristic: Callable = heuristic_nearest,
 ) -> SearchResult:
     """
-    Greedy Best-First Search: expande o nó com menor h(n).
-    Constrói uma rota que visita todos os targets (ordem determinada pela heurística)
-    e opcionalmente regressa a return_to.
+    Greedy com lookahead de 1 passo: escolhe o próximo local que minimiza
+    d(atual, loc) + h(loc, restantes sem loc). Opcionalmente regressa a return_to.
     """
     t0 = time.perf_counter()
     remaining = set(targets)
@@ -89,8 +113,13 @@ def greedy_search(
 
     while remaining:
         expanded += 1
-        # escolher o target com menor h
-        best = min(remaining, key=lambda loc: heuristic(problem, current, [loc]))
+        rem_sorted = sorted(remaining)  # determinismo em empates
+
+        def score(loc: int) -> float:
+            rest = [x for x in rem_sorted if x != loc]
+            return problem.get_distance(current, loc) + heuristic(problem, loc, rest)
+
+        best = min(rem_sorted, key=score)
         path.append(best)
         remaining.remove(best)
         current = best
@@ -110,44 +139,65 @@ def greedy_search(
     )
 
 
+# ----------------------------------------------------------------------
+# A*
+# ----------------------------------------------------------------------
 def a_star_search(
     problem: Problem,
     start: int,
     targets: List[int],
     return_to: Optional[int] = None,
     heuristic: Callable = heuristic_nearest,
+    max_expanded: int = 300_000,
 ) -> SearchResult:
     """
     A* sobre o espaço de subconjuntos de targets visitados.
-    Estado = (current_location, frozenset(remaining))
-    g = custo real acumulado, h = heurística residual.
+    Estado = (localização atual, frozenset(locais por visitar)).
+    g = distância acumulada; h = heurística residual (+ regresso no último passo).
     """
     t0 = time.perf_counter()
     targets_set = frozenset(targets)
-    # priority queue: (f, g, current, remaining, path)
+
+    h_cache = {}
+
+    def h(cur: int, rem: frozenset) -> float:
+        key = (cur, rem)
+        v = h_cache.get(key)
+        if v is None:
+            v = heuristic(problem, cur, list(rem))
+            h_cache[key] = v
+        return v
+
+    start_key = (start, targets_set)
+    best_g = {start_key: 0.0}
+    parent = {start_key: None}
     counter = 0
-    open_set = []
-    h0 = heuristic(problem, start, list(targets_set))
-    heapq.heappush(open_set, (h0, 0.0, counter, start, targets_set, [start]))
-    counter += 1
+    open_set = [(h(start, targets_set), 0.0, counter, start_key)]
     closed = set()
     expanded = 0
 
     while open_set:
-        f, g, _, current, remaining, path = heapq.heappop(open_set)
-        state_key = (current, remaining)
-        if state_key in closed:
+        f, g, _, key = heapq.heappop(open_set)
+        if key in closed:
             continue
-        closed.add(state_key)
+        if g > best_g.get(key, INF) + 1e-12:
+            continue  # entrada obsoleta
+        closed.add(key)
         expanded += 1
+        current, remaining = key
 
         if not remaining:
-            final_path = list(path)
-            if return_to is not None and final_path[-1] != return_to:
-                final_path.append(return_to)
-            dist, tempo = problem.cost_function(final_path)
+            path = []
+            k = key
+            while k is not None:
+                path.append(k[0])
+                k = parent[k]
+            path.reverse()
+            if return_to is not None and path[-1] != return_to:
+                path.append(return_to)
+            dist, tempo = problem.cost_function(path)
             return SearchResult(
-                path=final_path,
+                path=path,
                 cost_km=dist,
                 cost_min=tempo,
                 expanded=expanded,
@@ -156,35 +206,41 @@ def a_star_search(
                 heuristic=heuristic.__name__,
             )
 
+        if expanded >= max_expanded:
+            break
+
         for nxt in remaining:
             edge = problem.get_distance(current, nxt)
-            if edge == float("inf"):
+            if edge == INF:
                 continue
             new_g = g + edge
             new_rem = remaining - {nxt}
-            h = heuristic(problem, nxt, list(new_rem))
+            nk = (nxt, new_rem)
+            if nk in closed or new_g >= best_g.get(nk, INF) - 1e-12:
+                continue
+            best_g[nk] = new_g
+            parent[nk] = key
+            hh = h(nxt, new_rem)
             if return_to is not None and not new_rem:
-                h += problem.get_distance(nxt, return_to)
-            new_f = new_g + h
-            new_path = path + [nxt]
-            heapq.heappush(
-                open_set, (new_f, new_g, counter, nxt, new_rem, new_path)
-            )
+                hh += problem.get_distance(nxt, return_to)
             counter += 1
+            heapq.heappush(open_set, (new_g + hh, new_g, counter, nk))
 
+    msg = "Limite de nós expandidos atingido" if expanded >= max_expanded else "Nenhuma solução encontrada"
     return SearchResult(
         path=[],
-        cost_km=float("inf"),
-        cost_min=float("inf"),
+        cost_km=INF,
+        cost_min=INF,
         expanded=expanded,
         runtime_s=time.perf_counter() - t0,
         algorithm="A*",
         heuristic=heuristic.__name__,
         success=False,
-        message="Nenhuma solução encontrada",
+        message=msg,
     )
 
 
+# ----------------------------------------------------------------------
 def solve_vehicle_route(
     problem: Problem,
     vehicle_id: int,
@@ -199,33 +255,31 @@ def solve_vehicle_route(
     v = problem.vehicles[vehicle_id]
     center = v.center_loc_id
     if request_ids is None:
-        # seleccionar subset de pedidos que cabem na capacidade
         selected = []
         load = 0.0
         for r in problem.requests:
             if load + r.weight_kg <= v.capacity_kg:
                 selected.append(r)
                 load += r.weight_kg
-        targets = list({r.origin_id for r in selected})
     else:
-        selected = [r for r in problem.requests if r.item_id in request_ids]
-        targets = list({r.origin_id for r in selected})
+        wanted = set(request_ids)
+        selected = [r for r in problem.requests if r.item_id in wanted]
+
+    targets = sorted({r.origin_id for r in selected} - {center})
 
     heur = heuristic_nearest if heuristic_name == "nearest" else heuristic_mst_approx
 
     if algorithm == "greedy":
         return greedy_search(problem, center, targets, return_to=center, heuristic=heur)
-    else:
-        return a_star_search(problem, center, targets, return_to=center, heuristic=heur)
+    return a_star_search(problem, center, targets, return_to=center, heuristic=heur)
 
 
 if __name__ == "__main__":
     import sys, os
-    # permitir correr como python -m src.informed a partir da raiz do projeto
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if root not in sys.path:
         sys.path.insert(0, root)
-    data = os.path.join(root, "data_tiny")
+    data = os.path.join(root, "data_small")
     p = Problem(data)
     print(p.summary())
     for vid in p.vehicles:
